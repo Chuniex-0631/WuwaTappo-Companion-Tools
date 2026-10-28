@@ -1,0 +1,25 @@
+name: Feature request
+description: 提议新的本地功能或体验优化
+title: "[Feature] "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 使用场景
+      description: 这个功能希望解决什么问题？
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案
+    validations:
+      required: true
+  - type: checkboxes
+    id: local
+    attributes:
+      label: 项目边界
+      options:
+        - label: 该建议不需要网络劫持、进程注入或修改桌宠文件。
+          required: true

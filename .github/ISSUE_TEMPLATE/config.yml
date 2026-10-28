@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security report
+    url: https://github.com/Chuniex-0631/WuwaTappo-Companion-Tools/security
+    about: 请勿在公开 Issue 中披露安全漏洞细节

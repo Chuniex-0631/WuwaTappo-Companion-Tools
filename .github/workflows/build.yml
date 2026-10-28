@@ -1,0 +1,35 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Restore
+        run: msbuild WuwaTappoCompanionTools.sln /t:Restore /p:Configuration=Release
+
+      - name: Build
+        run: msbuild WuwaTappoCompanionTools.sln /m /p:Configuration=Release /p:ContinuousIntegrationBuild=true
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: WuwaTappo-Companion-Tools
+          path: |
+            src/WuwaTappoToolkit/bin/Release/net48/WuwaTappoToolkit.exe
+            src/WuwaTappoAutoPilot/bin/Release/net48/WuwaTappoAutoPilot.exe
