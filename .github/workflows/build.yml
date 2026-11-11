@@ -26,6 +26,12 @@ jobs:
       - name: Build
         run: msbuild WuwaTappoCompanionTools.sln /m /p:Configuration=Release /p:ContinuousIntegrationBuild=true
 
+      - name: Build offline state-machine tests
+        run: msbuild tests/AutoPilotControllerTests.csproj /restore /p:Configuration=Release
+
+      - name: Run offline state-machine tests
+        run: ./tests/bin/Release/net48/AutoPilotControllerTests.exe
+
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
