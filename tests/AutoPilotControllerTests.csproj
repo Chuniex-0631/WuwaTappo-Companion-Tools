@@ -10,7 +10,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="AutoPilotControllerTests.cs" />
-    <Compile Include="../src/WuwaTappoAutoPilot/AutoPilotController.cs" Link="AutoPilotController.cs" />
+    <Compile Include="../src/Shared/*.cs" Link="Shared/%(Filename)%(Extension)" />
     <Compile Include="../src/WuwaTappoAutoPilot/WuwaTappoAutoPilot.cs" Link="WuwaTappoAutoPilot.cs" />
     <Reference Include="UIAutomationClient" />
     <Reference Include="UIAutomationTypes" />

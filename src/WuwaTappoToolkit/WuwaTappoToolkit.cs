@@ -14,8 +14,8 @@ using AutomationTreeScope = System.Windows.Automation.TreeScope;
 
 [assembly: AssemblyTitle("桌宠工具箱")]
 [assembly: AssemblyProduct("桌宠工具箱")]
-[assembly: AssemblyVersion("1.3.1.0")]
-[assembly: AssemblyFileVersion("1.3.1.0")]
+[assembly: AssemblyVersion("1.4.0.0")]
+[assembly: AssemblyFileVersion("1.4.0.0")]
 
 internal static class Program
 {
@@ -53,7 +53,6 @@ internal sealed class MonitorForm : Form
     private const int PauseHotkeyId = 2;
     private const uint ModNoRepeat = 0x4000;
     private const uint VkPause = 0x13;
-    private const uint VkF24 = 0x87;
     private const int FixedRate = 50;
     private static readonly Color WindowColor = Color.FromArgb(255, 248, 232);
     private static readonly Color CardColor = Color.FromArgb(247, 232, 203);
@@ -79,21 +78,15 @@ internal sealed class MonitorForm : Form
     private readonly System.Windows.Forms.Timer windowAnimationTimer;
     private readonly object clickerStateSync = new object();
 
-    private bool monitoring;
+    private volatile bool monitoring;
     private bool scanning;
     private int monitorGeneration;
-    private Point? previousCandidate;
-    private int stableFrames;
-    private DateTime lastClaimAt = DateTime.MinValue;
-    private DateTime retryNotBefore = DateTime.MinValue;
-    private DateTime pendingClaimAt = DateTime.MinValue;
-    private int pendingMissingFrames;
-    private int pendingReadyFrames;
-    private DateTime pendingCooldownFirstSeenAt = DateTime.MinValue;
-    private int pendingClaimSlot = -1;
+    private readonly AutoPilotController controller = new AutoPilotController(false);
+    private readonly Stopwatch sessionClock = Stopwatch.StartNew();
+    private readonly List<PetReadJob> readJobs = new List<PetReadJob>();
+    private int petProcessId;
     private Point lastCursorPoint;
-    private DateTime lastCursorMoveAt = DateTime.UtcNow;
-    private int successfulClaims;
+    private double lastCursorMoveAt;
     private volatile bool clickerRunning;
     private Thread clickerWorker;
     private ManualResetEvent clickerStopSignal;
@@ -102,7 +95,7 @@ internal sealed class MonitorForm : Form
     private long lastDisplayTicks;
     private long lastClickerButtonToggleTicks;
     private long lastMonitorButtonToggleTicks;
-    private bool closing;
+    private volatile bool closing;
     private bool minimizing;
     private long animationStartedAt;
     private int animationDuration;
@@ -114,8 +107,6 @@ internal sealed class MonitorForm : Form
     private string transientActionText;
     private Color transientActionColor;
     private DateTime transientActionUntil = DateTime.MinValue;
-    [ThreadStatic]
-    private static int scanGenerationContext;
 
     public MonitorForm()
     {
@@ -248,7 +239,7 @@ internal sealed class MonitorForm : Form
         toggleButton.Text = "开始监控";
         toggleButton.MouseDown += MonitorToggleButtonMouseDown;
 
-        lastActionLabel = MakeLabel("尚未验证领取", 8.5F, FontStyle.Regular, MutedColor);
+        lastActionLabel = MakeLabel("监控关闭，点击上方按钮开始", 8.5F, FontStyle.Regular, MutedColor);
         lastActionLabel.AutoSize = false;
         lastActionLabel.TextAlign = ContentAlignment.MiddleLeft;
         Panel actionDivider = new Panel();
@@ -511,13 +502,13 @@ internal sealed class MonitorForm : Form
         lock (clickerStateSync)
         {
             if (clickerRunning) return;
+            if (clickerWorker != null && clickerWorker.IsAlive) return;
             clickerStopSignal = new ManualResetEvent(false);
             ManualResetEvent signal = clickerStopSignal;
             clickerRunning = true;
             clickerWorker = new Thread(new ThreadStart(delegate { ClickerLoop(signal); }));
             clickerWorker.IsBackground = true;
             clickerWorker.Name = "F24 sender";
-            clickerWorker.Priority = ThreadPriority.AboveNormal;
             clickerWorker.Start();
         }
         lastDisplayedCount = Interlocked.Read(ref sentCount);
@@ -532,14 +523,15 @@ internal sealed class MonitorForm : Form
 
     private void StopClicker()
     {
-        ManualResetEvent signal;
+        Thread worker;
         lock (clickerStateSync)
         {
-            if (!clickerRunning) return;
             clickerRunning = false;
-            signal = clickerStopSignal;
+            if (clickerStopSignal != null) clickerStopSignal.Set();
+            worker = clickerWorker;
         }
-        if (signal != null) signal.Set();
+        if (worker != null && worker != Thread.CurrentThread && worker.IsAlive)
+            worker.Join(250);
         NativeMethods.SendF24KeyUp();
         clickerStatusLabel.Text = "●  已停止";
         clickerStatusLabel.ForeColor = MutedColor;
@@ -566,17 +558,30 @@ internal sealed class MonitorForm : Form
                     signal.WaitOne(Math.Max(1, Math.Min(20, (int)Math.Ceiling((next - now) * 1000D))));
                     continue;
                 }
-                if (NativeMethods.SendF24Press()) Interlocked.Increment(ref sentCount);
+                lock (clickerStateSync)
+                {
+                    if (signal.WaitOne(0) || !clickerRunning) break;
+                    if (NativeMethods.SendF24Press()) Interlocked.Increment(ref sentCount);
+                }
                 next += interval;
                 double after = clock.Elapsed.TotalSeconds;
                 if (next <= after) next = after + interval;
             }
         }
+        catch (Exception ex)
+        {
+            Debug.WriteLine("F24 worker stopped: " + ex);
+        }
         finally
         {
             NativeMethods.SendF24KeyUp();
             NativeMethods.TimeEndPeriod(1);
-            signal.Dispose();
+            lock (clickerStateSync)
+            {
+                clickerRunning = false;
+                if (object.ReferenceEquals(clickerStopSignal, signal)) clickerStopSignal = null;
+                signal.Dispose();
+            }
         }
     }
 
@@ -599,14 +604,10 @@ internal sealed class MonitorForm : Form
         if (stoppedClickerForMonitoring)
             StopClicker();
 
-        monitorGeneration++;
+        Interlocked.Increment(ref monitorGeneration);
         monitoring = !monitoring;
-        previousCandidate = null;
-        stableFrames = 0;
-        pendingMissingFrames = 0;
-        pendingReadyFrames = 0;
-        pendingCooldownFirstSeenAt = DateTime.MinValue;
-        pendingClaimSlot = -1;
+        controller.Reset();
+        petProcessId = 0;
         if (monitoring)
         {
             toggleButton.Text = "停止监控";
@@ -634,241 +635,182 @@ internal sealed class MonitorForm : Form
             toggleButton.Invalidate();
             SetStatus("已停止", "不会检测或点击宝箱", MutedColor);
             SetSlotStatus("未监控", "未监控");
-            SetSingleLineText(lastActionLabel, successfulClaims == 0
-                ? "尚未验证领取"
-                : "已验证领取 " + successfulClaims + " 次", 8.5F, 7F);
-        }
-    }
-
-    private async void ScanTimer_Tick(object sender, EventArgs e)
-    {
-        if (!monitoring || scanning) return;
-        int generation = monitorGeneration;
-        scanning = true;
-        try
-        {
-            await System.Threading.Tasks.Task.Run(delegate { ScanOnce(generation); });
-        }
-        catch (Exception ex)
-        {
-            if (IsCurrentScan(generation))
-            {
-                ResetCandidate();
-                SafeStatus(generation, "监控暂时中断", "桌宠画面读取失败，将自动重试", ErrorColor);
-                Debug.WriteLine("Chest scan failed: " + ex);
-            }
-        }
-        finally
-        {
-            scanning = false;
+            SetSingleLineText(lastActionLabel, "监控已停止，不会检测或点击宝箱", 8.5F, 7F);
         }
     }
 
     private bool IsCurrentScan(int generation)
     {
-        return monitoring && generation == monitorGeneration && !IsDisposed;
+        return monitoring && generation == Volatile.Read(ref monitorGeneration) && !closing && !IsDisposed;
     }
 
-    private void ScanOnce(int generation)
+    private sealed class PetReadResult
     {
-        scanGenerationContext = generation;
-        if (!IsCurrentScan(generation)) return;
-        Process petProcess = FindPetProcess();
-        if (petProcess == null)
-        {
-            ResetCandidate();
-            SafeSlotStatus("未连接", "未连接");
-            SafeStatus(generation, "等待桌宠启动", "未找到正在运行的 Wuwa Tappo", WarningColor);
-            return;
-        }
+        public int ProcessId;
+        public IntPtr InputWindow;
+        public ChestAccessibilitySnapshot Snapshot;
+    }
 
+    private sealed class PetReadJob
+    {
+        public int ProcessId;
+        public int Generation;
+        public double Started;
+        public System.Threading.Tasks.Task<PetReadResult> Task;
+    }
+
+    private async System.Threading.Tasks.Task<PetReadResult> ReadPetWithDeadline(int generation)
+    {
+        // Process discovery does not call UIA. A new pet process can recover even if an old
+        // provider is stuck. At most two outstanding UIA reads exist, including abandoned ones.
+        int processId = await System.Threading.Tasks.Task.Run(delegate
+        {
+            using (Process process = FindPetProcess()) { return process == null ? 0 : process.Id; }
+        });
+        if (!IsCurrentScan(generation)) return null;
+        for (int i = readJobs.Count - 1; i >= 0; i--)
+        {
+            PetReadJob old = readJobs[i];
+            if (old.Task.IsCompleted && (old.ProcessId != processId || old.Generation != generation ||
+                sessionClock.Elapsed.TotalSeconds - old.Started > 3.0))
+            {
+                if (old.Task.IsFaulted) Debug.WriteLine(old.Task.Exception);
+                readJobs.RemoveAt(i);
+            }
+        }
+        if (processId == 0) return new PetReadResult();
+        PetReadJob job = readJobs.Find(delegate(PetReadJob item) { return item.ProcessId == processId; });
+        if (job == null)
+        {
+            if (readJobs.Count >= 2) return null;
+            job = new PetReadJob { ProcessId = processId, Generation = generation,
+                Started = sessionClock.Elapsed.TotalSeconds,
+                Task = System.Threading.Tasks.Task.Run((Func<PetReadResult>)ReadPet) };
+            readJobs.Add(job);
+        }
+        if (await System.Threading.Tasks.Task.WhenAny(job.Task,
+            System.Threading.Tasks.Task.Delay(2000)) != job.Task) return null;
+        readJobs.Remove(job);
+        if (job.Generation != generation || sessionClock.Elapsed.TotalSeconds - job.Started > 3.0)
+        {
+            if (job.Task.IsFaulted) Debug.WriteLine(job.Task.Exception);
+            return null;
+        }
+        PetReadResult result = await job.Task;
+        return result.ProcessId == processId ? result : null;
+    }
+
+    private static PetReadResult ReadPet()
+    {
+        using (Process process = FindPetProcess())
+        {
+            if (process == null) return new PetReadResult();
+            IntPtr window = process.MainWindowHandle;
+            IntPtr input = NativeMethods.FindDesktopCatInput((uint)process.Id);
+            return new PetReadResult { ProcessId = process.Id, InputWindow = input,
+                Snapshot = window == IntPtr.Zero || input == IntPtr.Zero
+                    ? null : ChestAccessibilityReader.Read(window) };
+        }
+    }
+
+    private async void ScanTimer_Tick(object sender, EventArgs e)
+    {
+        if (!monitoring || scanning || closing) return;
+        int generation = Volatile.Read(ref monitorGeneration);
+        scanning = true;
         try
         {
-        if (!IsCurrentScan(generation)) return;
-        IntPtr inputWindow = NativeMethods.FindDesktopCatInput((uint)petProcess.Id);
-        IntPtr mainWindow = petProcess.MainWindowHandle;
-        if (mainWindow == IntPtr.Zero || inputWindow == IntPtr.Zero)
-        {
-            ResetCandidate();
-            SafeSlotStatus("未连接", "未连接");
-            SafeStatus(generation, "等待桌宠就绪", "桌宠正在启动，尚未建立输入窗口", WarningColor);
-            return;
-        }
-
-        ChestAccessibilitySnapshot slotSnapshot = ChestAccessibilityReader.Read(mainWindow);
-        if (!slotSnapshot.Available)
-        {
-            ResetCandidate();
-            SafeSlotStatus("读取中", "读取中");
-            SafeStatus(generation, "等待槽位状态", "暂时无法读取上下宝箱状态，不会执行点击", WarningColor);
-            return;
-        }
-        SafeSlotStatus(slotSnapshot.Upper.DisplayText, slotSnapshot.Lower.DisplayText);
-
-        Point cursor;
-        if (NativeMethods.GetCursorPos(out cursor))
-        {
-            if (Math.Abs(cursor.X - lastCursorPoint.X) > 2 || Math.Abs(cursor.Y - lastCursorPoint.Y) > 2)
-                lastCursorMoveAt = DateTime.UtcNow;
-            lastCursorPoint = cursor;
-        }
-
-        ChestCandidate candidate;
-        bool cooldownVisible = false;
-        if (pendingClaimSlot >= 0)
-        {
-            ChestSlotObservation pendingSlot = slotSnapshot.Slot(pendingClaimSlot);
-            cooldownVisible = pendingSlot.State == ChestSlotState.Countdown;
-            candidate = pendingSlot.ToCandidate(pendingClaimSlot);
-        }
-        else
-        {
-            candidate = slotSnapshot.FirstReadyCandidate();
-        }
-
-        if (pendingClaimSlot >= 0)
-        {
+            PetReadResult read = await ReadPetWithDeadline(generation);
             if (!IsCurrentScan(generation)) return;
-            TimeSpan elapsed = DateTime.UtcNow - pendingClaimAt;
-            bool originalChestStillReady = slotSnapshot.Slot(pendingClaimSlot).State == ChestSlotState.Ready;
-
-            if (elapsed.TotalSeconds < 1.0)
+            if (read == null)
             {
-                SafeStatus("正在验证领取结果", "已发送点击，等待桌宠完成领取…", WarningColor);
+                StopClicker();
+                controller.Invalidate();
+                SetSlotStatus("读取中", "读取中");
+                SetStatus("等待读取恢复", "桌宠响应超时，已暂停输入并等待恢复", WarningColor);
+                return;
+            }
+            if (read.ProcessId != petProcessId)
+            {
+                StopClicker();
+                controller.Reset();
+                petProcessId = read.ProcessId;
+            }
+            if (read.Snapshot == null || !read.Snapshot.Available)
+            {
+                StopClicker();
+                controller.Invalidate();
+                SetSlotStatus(read.ProcessId == 0 ? "未连接" : "读取中",
+                    read.ProcessId == 0 ? "未连接" : "读取中");
+                SetStatus("等待桌宠就绪", "请保持已登录，点数与槽位可读取后自动继续", WarningColor);
                 return;
             }
 
-            if (originalChestStillReady)
+            ChestAccessibilitySnapshot snapshot = read.Snapshot;
+            SetSlotStatus(snapshot.Upper.DisplayText, snapshot.Lower.DisplayText);
+            PilotDecision plan = controller.Observe(snapshot, sessionClock.Elapsed.TotalSeconds);
+            SetStatus(plan.State, plan.Detail, plan.Action == PilotAction.Fill ? WarningColor : SuccessColor);
+            StopClicker();
+
+            if (plan.Action != PilotAction.Claim) return;
+            Point cursor;
+            if (NativeMethods.GetCursorPos(out cursor))
             {
-                pendingReadyFrames++;
-                if (pendingReadyFrames < 3 || elapsed.TotalSeconds < 3.0)
-                {
-                    SafeStatus("正在验证领取结果", "目标槽位仍显示宝箱，正在继续确认…", WarningColor);
-                    return;
-                }
-                pendingMissingFrames = 0;
-                pendingReadyFrames = 0;
-                pendingCooldownFirstSeenAt = DateTime.MinValue;
-                pendingClaimSlot = -1;
-                retryNotBefore = DateTime.UtcNow.AddSeconds(3);
-                ResetCandidate();
-                SafeStatus("领取未成功", "宝箱仍可领取，3 秒后自动重试", ErrorColor);
-                SafeLastAction("上次领取未确认，等待自动重试");
+                if (Math.Abs((double)cursor.X - lastCursorPoint.X) > 2 ||
+                    Math.Abs((double)cursor.Y - lastCursorPoint.Y) > 2)
+                    lastCursorMoveAt = sessionClock.Elapsed.TotalSeconds;
+                lastCursorPoint = cursor;
+            }
+            if (sessionClock.Elapsed.TotalSeconds - lastCursorMoveAt < 0.8 || NativeMethods.IsMouseButtonDown())
+            {
+                SetStatus("宝箱已就绪", "鼠标正在使用，空闲后自动领取", WarningColor);
+                return;
+            }
+            ChestCandidate candidate = plan.Candidate;
+            if (!NativeMethods.BelongsToProcessAt(candidate.ScreenCenter, (uint)read.ProcessId, read.InputWindow))
+            {
+                controller.RecordClick(candidate.SlotIndex, snapshot.PointBalance,
+                    sessionClock.Elapsed.TotalSeconds, false);
+                SetStatus("等待宝箱可点击", "宝箱位置被遮挡或已移动，稍后重新检查", WarningColor);
                 return;
             }
 
-            if (!cooldownVisible)
-            {
-                pendingMissingFrames = 0;
-                pendingReadyFrames = 0;
-                if (elapsed.TotalSeconds < 8.0)
-                {
-                    SafeStatus("正在验证领取结果", "尚未看到冷却倒计时，继续等待…", WarningColor);
-                    return;
-                }
-
-                pendingReadyFrames = 0;
-                pendingCooldownFirstSeenAt = DateTime.MinValue;
-                pendingClaimSlot = -1;
-                retryNotBefore = DateTime.UtcNow.AddSeconds(5);
-                ResetCandidate();
-                SafeStatus("领取结果未确认", "未识别到冷却倒计时，5 秒后重试", ErrorColor);
-                SafeLastAction("本次未计入成功，等待自动重试");
-                return;
-            }
-
-            if (pendingMissingFrames == 0)
-                pendingCooldownFirstSeenAt = DateTime.UtcNow;
-            pendingReadyFrames = 0;
-            pendingMissingFrames++;
-            if (pendingMissingFrames < 2 ||
-                (DateTime.UtcNow - pendingCooldownFirstSeenAt).TotalMilliseconds < 500D)
-            {
-                SafeStatus("正在验证领取结果", "目标槽位已进入倒计时，正在连续确认…", WarningColor);
-                return;
-            }
-
+            // Refresh the exact slot before input, after stopping and draining the F24 worker.
+            PetReadResult fresh = await ReadPetWithDeadline(generation);
             if (!IsCurrentScan(generation)) return;
-            successfulClaims++;
-            pendingMissingFrames = 0;
-            pendingReadyFrames = 0;
-            pendingCooldownFirstSeenAt = DateTime.MinValue;
-            pendingClaimSlot = -1;
-            retryNotBefore = DateTime.UtcNow.AddSeconds(1);
-            ResetCandidate();
-            SafeStatus("领取成功", "已确认原宝箱位置进入冷却", SuccessColor);
-            SafeLastAction("已验证领取 " + successfulClaims + " 次 · " + DateTime.Now.ToString("HH:mm:ss"));
-            return;
-        }
+            ChestCandidate latest = fresh != null && fresh.ProcessId == read.ProcessId && fresh.Snapshot != null &&
+                fresh.Snapshot.Available && fresh.Snapshot.PointBalance >= 1000
+                ? fresh.Snapshot.Slot(candidate.SlotIndex).ToCandidate(candidate.SlotIndex) : null;
+            if (latest == null || latest.ScreenCenter != candidate.ScreenCenter)
+            {
+                controller.Invalidate();
+                SetStatus("重新读取槽位", "宝箱或点数已变化，下一轮重新规划", WarningColor);
+                return;
+            }
 
-        if (candidate == null)
-        {
-            ResetCandidate();
-            SafeStatus("监控中", "桌宠已连接 · 当前没有可领取宝箱", SuccessColor);
-            return;
-        }
-
-        if (previousCandidate.HasValue && Distance(previousCandidate.Value, candidate.ScreenCenter) <= 18)
-            stableFrames++;
-        else
-            stableFrames = 1;
-        previousCandidate = candidate.ScreenCenter;
-
-        if (stableFrames < 2)
-        {
-            SafeStatus("发现疑似宝箱", "正在进行第二次本地复核…", WarningColor);
-            return;
-        }
-
-        if (DateTime.UtcNow < retryNotBefore)
-        {
-            int seconds = Math.Max(1, (int)Math.Ceiling((retryNotBefore - DateTime.UtcNow).TotalSeconds));
-            SafeStatus("等待重新领取", "上次未成功，将在 " + seconds + " 秒后重试", WarningColor);
-            return;
-        }
-
-        if ((DateTime.UtcNow - lastClaimAt).TotalSeconds < 3.0)
-        {
-            SafeStatus("领取处理中", "等待桌宠完成宝箱动画", WarningColor);
-            return;
-        }
-
-        if ((DateTime.UtcNow - lastCursorMoveAt).TotalMilliseconds < 350 || NativeMethods.IsMouseButtonDown())
-        {
-            SafeStatus("宝箱已就绪", "检测到鼠标正在使用，稍后自动领取", WarningColor);
-            return;
-        }
-
-        if (!NativeMethods.BelongsToProcessAt(candidate.ScreenCenter, (uint)petProcess.Id, inputWindow))
-        {
-            ResetCandidate();
-            SafeStatus("监控中", "宝箱位置发生变化，已取消本次点击", SuccessColor);
-            return;
-        }
-
-        if (!IsCurrentScan(generation)) return;
-        if (NativeMethods.ClickAndRestore(inputWindow, candidate.ScreenCenter, (uint)petProcess.Id))
-        {
+            SetStatus("正在领取宝箱", "已停止连点，等待桌宠响应本次操作", WarningColor);
+            bool sent = await System.Threading.Tasks.Task.Run(delegate
+            {
+                return NativeMethods.ClickAndRestore(fresh.InputWindow, latest.ScreenCenter,
+                    (uint)fresh.ProcessId, delegate { return IsCurrentScan(generation); });
+            });
             if (!IsCurrentScan(generation)) return;
-            lastClaimAt = DateTime.UtcNow;
-            pendingClaimAt = DateTime.UtcNow;
-            pendingMissingFrames = 0;
-            pendingReadyFrames = 0;
-            pendingCooldownFirstSeenAt = DateTime.MinValue;
-            pendingClaimSlot = candidate.SlotIndex;
-            ResetCandidate();
-            SafeStatus("正在验证领取结果", "点击已发送，尚未计入成功次数", WarningColor);
-            SafeLastAction("已点击宝箱，正在验证结果");
+            controller.RecordClick(candidate.SlotIndex, fresh.Snapshot.PointBalance,
+                sessionClock.Elapsed.TotalSeconds, sent);
+            SetStatus(sent ? "等待领取响应" : "点击已暂停",
+                sent ? "下一轮将根据实际余额和槽位重新规划" : "输入未完成或鼠标已移动，稍后重新检查", WarningColor);
         }
-        else
+        catch (Exception ex)
         {
-            SafeStatus("点击未完成", "系统没有接受本次鼠标输入，将稍后重试", ErrorColor);
+            if (IsCurrentScan(generation))
+            {
+                StopClicker();
+                controller.Invalidate();
+                SetStatus("等待状态恢复", "本地状态读取中断，稍后自动重试", ErrorColor);
+            }
+            Debug.WriteLine("AutoPilot scan failed: " + ex);
         }
-        }
-        finally
-        {
-            petProcess.Dispose();
-        }
+        finally { scanning = false; }
     }
 
     private static Process FindPetProcess()
@@ -892,45 +834,28 @@ internal sealed class MonitorForm : Form
         return selected;
     }
 
-    private void ResetCandidate()
-    {
-        previousCandidate = null;
-        stableFrames = 0;
-    }
 
-    private static double Distance(Point a, Point b)
-    {
-        int dx = a.X - b.X;
-        int dy = a.Y - b.Y;
-        return Math.Sqrt(dx * dx + dy * dy);
-    }
-
-    private void SafeStatus(string state, string detail, Color color)
-    {
-        SafeStatus(scanGenerationContext, state, detail, color);
-    }
-
-    private void SafeStatus(int generation, string state, string detail, Color color)
-    {
-        if (!IsCurrentScan(generation)) return;
-        try { BeginInvoke((Action)delegate { if (IsCurrentScan(generation)) SetStatus(state, detail, color); }); }
-        catch (InvalidOperationException) { }
-    }
 
     private void SetStatus(string state, string detail, Color color)
     {
         if (ShowTransientActionIfActive()) return;
         lastActionLabel.ForeColor = color;
-        SetSingleLineText(lastActionLabel, state + " · " + detail, 8.5F, 7F);
+        string text = state + " · " + detail;
+        using (Graphics graphics = lastActionLabel.CreateGraphics())
+        using (Font minimum = new Font("Microsoft YaHei UI", 7F * currentUiScale,
+            lastActionLabel.Font.Style, GraphicsUnit.Point))
+        {
+            // The detail already describes the state; drop only the redundant prefix
+            // when a high DPI would otherwise clip the one-line message.
+            if (TextRenderer.MeasureText(graphics, text, minimum,
+                new Size(int.MaxValue, lastActionLabel.Height),
+                TextFormatFlags.NoPadding | TextFormatFlags.SingleLine).Width > lastActionLabel.Width)
+                text = detail;
+        }
+        SetSingleLineText(lastActionLabel, text, 8.5F, 7F);
     }
 
-    private void SafeSlotStatus(string upper, string lower)
-    {
-        int generation = scanGenerationContext;
-        if (!IsCurrentScan(generation)) return;
-        try { BeginInvoke((Action)delegate { if (IsCurrentScan(generation)) SetSlotStatus(upper, lower); }); }
-        catch (InvalidOperationException) { }
-    }
+
 
     private void SetSlotStatus(string upper, string lower)
     {
@@ -943,7 +868,7 @@ internal sealed class MonitorForm : Form
     private static Color SlotStatusColor(string value)
     {
         if (value == "宝箱") return SuccessColor;
-        if (value == "空") return MutedColor;
+        if (value == "空" || value == "空/隐藏") return MutedColor;
         if (value == "未连接" || value == "未监控") return MutedColor;
         return WarningColor;
     }
@@ -1021,18 +946,12 @@ internal sealed class MonitorForm : Form
         }
     }
 
-    private void SafeLastAction(string text)
-    {
-        int generation = scanGenerationContext;
-        if (!IsCurrentScan(generation)) return;
-        try { BeginInvoke((Action)delegate { if (IsCurrentScan(generation) && !ShowTransientActionIfActive()) SetSingleLineText(lastActionLabel, text, 8.5F, 7F); }); }
-        catch (InvalidOperationException) { }
-    }
+
 
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
         monitoring = false;
-        monitorGeneration++;
+        Interlocked.Increment(ref monitorGeneration);
         scanTimer.Stop();
         StopClicker();
         Thread worker;
@@ -1166,190 +1085,6 @@ internal sealed class ModernButton : Button
     private static Color Darken(Color c, float f) { return Color.FromArgb(c.A, (int)(c.R * f), (int)(c.G * f), (int)(c.B * f)); }
 }
 
-internal sealed class ChestCandidate
-{
-    public Point ScreenCenter;
-    public Rectangle ScreenBounds;
-    public int SlotIndex = -1;
-}
-
-internal enum ChestSlotState
-{
-    Empty,
-    Countdown,
-    Ready
-}
-
-internal sealed class ChestSlotObservation
-{
-    public ChestSlotState State;
-    public string DisplayText = "空";
-    public Rectangle ScreenBounds;
-
-    public ChestCandidate ToCandidate(int slotIndex)
-    {
-        if (State != ChestSlotState.Ready || ScreenBounds.Width <= 0 || ScreenBounds.Height <= 0) return null;
-        ChestCandidate candidate = new ChestCandidate();
-        candidate.SlotIndex = slotIndex;
-        candidate.ScreenBounds = ScreenBounds;
-        candidate.ScreenCenter = new Point(ScreenBounds.Left + ScreenBounds.Width / 2, ScreenBounds.Top + ScreenBounds.Height / 2);
-        return candidate;
-    }
-}
-
-internal sealed class ChestAccessibilitySnapshot
-{
-    public bool Available;
-    public readonly ChestSlotObservation Upper = new ChestSlotObservation();
-    public readonly ChestSlotObservation Lower = new ChestSlotObservation();
-
-    public ChestSlotObservation Slot(int index) { return index == 0 ? Upper : Lower; }
-
-    public ChestCandidate FirstReadyCandidate()
-    {
-        ChestCandidate upper = Upper.ToCandidate(0);
-        return upper ?? Lower.ToCandidate(1);
-    }
-}
-
-internal static class ChestAccessibilityReader
-{
-    private sealed class VisibleReward
-    {
-        public ChestSlotState State;
-        public string Text;
-        public Rectangle Bounds;
-    }
-
-    public static ChestAccessibilitySnapshot Read(IntPtr window)
-    {
-        ChestAccessibilitySnapshot result = new ChestAccessibilitySnapshot();
-        try
-        {
-            AutomationElement root = AutomationElement.FromHandle(window);
-            if (root == null) return result;
-            System.Windows.Automation.AutomationElementCollection elements = root.FindAll(
-                AutomationTreeScope.Descendants, AutomationCondition.TrueCondition);
-
-            double counterCenterY = double.NaN;
-            double scale = 1D;
-            List<VisibleReward> rewards = new List<VisibleReward>();
-            for (int i = 0; i < elements.Count; i++)
-            {
-                AutomationElement element = elements[i];
-                string name = element.Current.Name ?? string.Empty;
-                System.Windows.Rect nativeBounds = element.Current.BoundingRectangle;
-                if (nativeBounds.IsEmpty || nativeBounds.Width <= 0D || nativeBounds.Height <= 0D) continue;
-
-                if (element.Current.ControlType == AutomationControlType.Text && IsUnsignedInteger(name) && name.Length >= 3)
-                {
-                    counterCenterY = nativeBounds.Top + nativeBounds.Height / 2D;
-                    scale = Math.Max(0.75D, Math.Min(3D, nativeBounds.Height / 23.2D));
-                    continue;
-                }
-
-                if (element.Current.ControlType == AutomationControlType.Image && IsCountdownText(name))
-                {
-                    rewards.Add(new VisibleReward
-                    {
-                        State = ChestSlotState.Countdown,
-                        Text = name,
-                        Bounds = ToRectangle(nativeBounds)
-                    });
-                    continue;
-                }
-
-                if (element.Current.ControlType == AutomationControlType.Button)
-                {
-                    rewards.Add(new VisibleReward
-                    {
-                        State = ChestSlotState.Ready,
-                        Text = "宝箱",
-                        Bounds = ToRectangle(nativeBounds)
-                    });
-                }
-            }
-
-            if (double.IsNaN(counterCenterY))
-            {
-                List<VisibleReward> named = rewards.FindAll(delegate(VisibleReward item) { return item.State == ChestSlotState.Countdown; });
-                named.Sort(delegate(VisibleReward a, VisibleReward b) { return a.Bounds.Top.CompareTo(b.Bounds.Top); });
-                if (named.Count >= 2)
-                {
-                    Assign(result.Upper, named[0]);
-                    Assign(result.Lower, named[named.Count - 1]);
-                    result.Available = true;
-                }
-                return result;
-            }
-
-            double upperCenterY = counterCenterY - 88.4D * scale;
-            double lowerCenterY = counterCenterY - 40.4D * scale;
-            double maximumDistance = 24D * scale;
-            foreach (VisibleReward reward in rewards)
-            {
-                double centerY = reward.Bounds.Top + reward.Bounds.Height / 2D;
-                double upperDistance = Math.Abs(centerY - upperCenterY);
-                double lowerDistance = Math.Abs(centerY - lowerCenterY);
-                double distance = Math.Min(upperDistance, lowerDistance);
-                if (distance > maximumDistance) continue;
-
-                if (reward.State == ChestSlotState.Ready)
-                {
-                    double expectedWidth = 62D * scale;
-                    double expectedHeight = 44D * scale;
-                    if (Math.Abs(reward.Bounds.Width - expectedWidth) > 13D * scale ||
-                        Math.Abs(reward.Bounds.Height - expectedHeight) > 12D * scale)
-                        continue;
-                }
-
-                ChestSlotObservation target = upperDistance <= lowerDistance ? result.Upper : result.Lower;
-                if (target.State == ChestSlotState.Empty || reward.State == ChestSlotState.Countdown)
-                    Assign(target, reward);
-            }
-            result.Available = true;
-        }
-        catch (System.Windows.Automation.ElementNotAvailableException) { }
-        catch (InvalidOperationException) { }
-        catch (COMException) { }
-        catch (Exception ex) { Debug.WriteLine("Chest accessibility read failed: " + ex); }
-        return result;
-    }
-
-    private static void Assign(ChestSlotObservation target, VisibleReward reward)
-    {
-        target.State = reward.State;
-        target.DisplayText = reward.Text;
-        target.ScreenBounds = reward.Bounds;
-    }
-
-    private static Rectangle ToRectangle(System.Windows.Rect value)
-    {
-        return new Rectangle(
-            (int)Math.Round(value.Left),
-            (int)Math.Round(value.Top),
-            Math.Max(1, (int)Math.Round(value.Width)),
-            Math.Max(1, (int)Math.Round(value.Height)));
-    }
-
-    private static bool IsCountdownText(string value)
-    {
-        if (value.Length < 4 || value.Length > 6) return false;
-        int colon = value.IndexOf(':');
-        if (colon < 1 || colon != value.LastIndexOf(':') || value.Length - colon - 1 != 2) return false;
-        for (int i = 0; i < value.Length; i++)
-            if (i != colon && (value[i] < '0' || value[i] > '9')) return false;
-        return true;
-    }
-
-    private static bool IsUnsignedInteger(string value)
-    {
-        if (string.IsNullOrEmpty(value)) return false;
-        for (int i = 0; i < value.Length; i++)
-            if (value[i] < '0' || value[i] > '9') return false;
-        return true;
-    }
-}
 
 internal static class NativeMethods
 {
@@ -1510,14 +1245,15 @@ internal static class NativeMethods
                (GetAsyncKeyState(0x04) & 0x8000) != 0;
     }
 
-    internal static bool ClickAndRestore(IntPtr inputWindow, Point target, uint processId)
+    internal static bool ClickAndRestore(IntPtr inputWindow, Point target, uint processId, Func<bool> canContinue)
     {
+        if (!canContinue() || IsMouseButtonDown()) return false;
         Point original;
         if (!GetCursorPos(out original)) return false;
         if (!SetCursorPos(target.X, target.Y)) return false;
         Thread.Sleep(80);
 
-        if (!IsCursorNear(target, 8) || !BelongsToProcessAt(target, processId, inputWindow))
+        if (!canContinue() || IsMouseButtonDown() || !IsCursorNear(target, 8) || !BelongsToProcessAt(target, processId, inputWindow))
         {
             RestoreCursorIfUntouched(original, target);
             return false;
@@ -1537,7 +1273,7 @@ internal static class NativeMethods
         }
         Thread.Sleep(120);
 
-        if (!IsCursorNear(target, 8) || !BelongsToProcessAt(target, processId, inputWindow))
+        if (!canContinue() || IsMouseButtonDown() || !IsCursorNear(target, 8) || !BelongsToProcessAt(target, processId, inputWindow))
         {
             RestoreCursorIfUntouched(original, target);
             return false;

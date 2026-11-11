@@ -21,6 +21,10 @@ internal static class AutoPilotControllerTests
         Run("Pending transaction cannot be proven by other slot", OtherSlotDoesNotCompletePending);
         Run("Invalidated reading resets consecutive observations", InvalidateResetsStability);
         Run("Exhaustive fresh-state action matrix", FreshStateMatrix);
+        Run("Manual monitoring never fills any state combination", ManualModeMatrix);
+        Run("Manual hidden-after-debit returns to monitoring", ManualHiddenCycle);
+        Run("Manual dual-chest cycle requires no refill", ManualDualCycle);
+        Run("Manual disabled, unavailable and backoff stay safe", ManualBusyAndBackoff);
         Console.WriteLine("PASS: " + scenarios + " scenarios; " + assertions + " assertions.");
     }
 
@@ -251,5 +255,88 @@ internal static class AutoPilotControllerTests
             else
                 Expect(PilotAction.Wait, d, label + " sufficient reserve");
         }
+    }
+
+    private static void ManualModeMatrix()
+    {
+        ChestSlotState[] states = { ChestSlotState.Empty, ChestSlotState.Countdown, ChestSlotState.Ready, ChestSlotState.Busy };
+        long[] balances = { -1, 0, 99, 999, 1000, 1500, 1999, 2000, 3000, 728923 };
+        foreach (long balance in balances)
+        foreach (ChestSlotState upper in states)
+        foreach (ChestSlotState lower in states)
+        {
+            AutoPilotController c = new AutoPilotController(false);
+            ChestAccessibilitySnapshot s = Snapshot(balance, upper, lower);
+            string label = "manual " + balance + ":" + upper + "/" + lower;
+            Expect(PilotAction.Wait, c.Observe(s, 0), label + " first observation never fills");
+            bool canClaim = balance >= 1000 && upper != ChestSlotState.Busy && lower != ChestSlotState.Busy &&
+                (upper == ChestSlotState.Ready || lower == ChestSlotState.Ready);
+            if (canClaim)
+                ExpectSlot(upper == ChestSlotState.Ready ? 0 : 1, c.Observe(s, 1), label + " ready can be claimed");
+            else
+                Expect(PilotAction.Wait, c.Observe(s, 60), label + " prolonged monitoring never fills");
+        }
+    }
+
+    private static void ManualHiddenCycle()
+    {
+        AutoPilotController c = new AutoPilotController(false);
+        Expect(PilotAction.Wait, c.Observe(Snapshot(0, ChestSlotState.Empty, ChestSlotState.Empty), 0), "manual zero waits for user input");
+        ChestAccessibilitySnapshot ready = Snapshot(1000, ChestSlotState.Ready, ChestSlotState.Empty);
+        Expect(PilotAction.Wait, c.Observe(ready, 1), "manual threshold stabilizes");
+        ExpectSlot(0, c.Observe(ready, 2), "manual threshold can claim");
+        c.RecordClick(0, 1000, 2, true);
+        ChestAccessibilitySnapshot hidden = Snapshot(0, ChestSlotState.Empty, ChestSlotState.Empty);
+        Expect(PilotAction.Wait, c.Observe(hidden, 3), "manual settle");
+        Expect(PilotAction.Wait, c.Observe(hidden, 4), "manual first hidden observation");
+        Expect(PilotAction.Wait, c.Observe(hidden, 5), "manual hidden reconciled");
+        PilotDecision wait = c.Observe(hidden, 6);
+        Expect(PilotAction.Wait, wait, "manual must not refill hidden slots");
+        assertions++;
+        if (wait.State != "监控中") throw new Exception("manual hidden transaction did not finish");
+        Expect(PilotAction.Wait, c.Observe(Snapshot(999, ChestSlotState.Empty, ChestSlotState.Empty), 60), "manual user progress below threshold waits");
+        Expect(PilotAction.Wait, c.Observe(ready, 61), "manual fresh visible chest stabilizes");
+        ExpectSlot(0, c.Observe(ready, 62), "manual can run another cycle after user replenishment");
+    }
+
+    private static void ManualDualCycle()
+    {
+        AutoPilotController c = new AutoPilotController(false);
+        ChestAccessibilitySnapshot both = Snapshot(2000, ChestSlotState.Ready, ChestSlotState.Ready);
+        Expect(PilotAction.Wait, c.Observe(both, 0), "manual both stabilize");
+        ExpectSlot(0, c.Observe(both, 1), "manual upper claim");
+        c.RecordClick(0, 2000, 1, true);
+        ChestAccessibilitySnapshot lower = Snapshot(1000, ChestSlotState.Empty, ChestSlotState.Ready);
+        Expect(PilotAction.Wait, c.Observe(lower, 3), "manual upper hidden after deduction");
+        Expect(PilotAction.Wait, c.Observe(lower, 4), "manual upper reconciliation");
+        Expect(PilotAction.Wait, c.Observe(lower, 5), "manual lower stabilizes");
+        ExpectSlot(1, c.Observe(lower, 6), "manual lower remains claimable");
+        c.RecordClick(1, 1000, 6, true);
+        ChestAccessibilitySnapshot hidden = Snapshot(0, ChestSlotState.Empty, ChestSlotState.Empty);
+        Expect(PilotAction.Wait, c.Observe(hidden, 8), "manual lower first hidden");
+        Expect(PilotAction.Wait, c.Observe(hidden, 9), "manual lower reconciliation");
+        Expect(PilotAction.Wait, c.Observe(hidden, 10), "manual dual depletion does not refill");
+        Expect(PilotAction.Wait, c.Observe(Snapshot(2000, ChestSlotState.Countdown, ChestSlotState.Countdown), 30), "manual cooldown stays monitoring");
+    }
+
+    private static void ManualBusyAndBackoff()
+    {
+        AutoPilotController c = new AutoPilotController(false);
+        ChestAccessibilitySnapshot unknown = Snapshot(0, ChestSlotState.Empty, ChestSlotState.Empty);
+        unknown.Available = false;
+        Expect(PilotAction.Wait, c.Observe(unknown, 0), "manual unavailable");
+        Expect(PilotAction.Wait, c.Observe(Snapshot(1000, ChestSlotState.Busy, ChestSlotState.Ready), 1), "manual disabled target blocks input");
+        ChestAccessibilitySnapshot both = Snapshot(2000, ChestSlotState.Ready, ChestSlotState.Ready);
+        c.RecordClick(0, 2000, 2, false);
+        Expect(PilotAction.Wait, c.Observe(both, 2.5), "manual lower stabilizes during upper backoff");
+        ExpectSlot(1, c.Observe(both, 3.5), "manual failed upper cannot starve lower");
+        c.Reset();
+        ChestAccessibilitySnapshot ready = Snapshot(1000, ChestSlotState.Ready, ChestSlotState.Empty);
+        c.RecordClick(0, 1000, 4, true);
+        Expect(PilotAction.Wait, c.Observe(ready, 15), "manual waits for response");
+        Expect(PilotAction.Wait, c.Observe(ready, 16), "manual timeout starts backoff");
+        Expect(PilotAction.Wait, c.Observe(ready, 18), "manual backoff continues");
+        Expect(PilotAction.Wait, c.Observe(ready, 19), "manual retry stabilizes");
+        ExpectSlot(0, c.Observe(ready, 20), "manual retry after backoff");
     }
 }

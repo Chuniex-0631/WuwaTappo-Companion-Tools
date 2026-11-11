@@ -27,7 +27,17 @@ msbuild WuwaTappoCompanionTools.sln /restore /p:Configuration=Release
 - UI：Windows Forms，自绘圆角控件，Per-Monitor V2 DPI。
 - 状态读取：Windows UI Automation。
 - 计数输入：Windows `SendInput`，发送 F24 按下与抬起。
-- 宝箱领取：验证目标窗口后发送鼠标输入，随后按原槽位倒计时确认结果。
-- 网络：无网络依赖。
+- 宝箱领取：两款程序编译 `src/Shared/` 同一份识别和控制器代码，点击后观察原槽变化并重新规划。
+- 低余额导致槽位隐藏时，工具箱继续监控，自动挂机按余额重新补点；两款都不统计领取数量。
+- 网络：工具不发网络请求，桌宠本体的登录和奖励领取仍走自身网络流程。
 
-`dist/` 中的 EXE 是人工验收版本；自行构建的二进制哈希会因编译环境而不同。
+## 离线状态机测试
+
+```powershell
+msbuild tests/AutoPilotControllerTests.csproj /restore /p:Configuration=Release
+./tests/bin/Release/net48/AutoPilotControllerTests.exe
+```
+
+测试包含自动补点与纯监控两种模式，不发送真实键鼠输入。
+
+`dist/` 中的 EXE 是发布二进制，经过编译与离线回归验证；自行构建的哈希会因编译环境而不同。

@@ -17,6 +17,7 @@ internal sealed class PilotDecision
 internal sealed class AutoPilotController
 {
     internal const long Reserve = 2000;
+    private readonly bool autoRefill;
     private int pendingSlot = -1;
     private double clickedAt;
     private long beforeClick;
@@ -31,6 +32,11 @@ internal sealed class AutoPilotController
     private long lastBalance = -1;
     private double progressAt;
     private double fillPausedUntil;
+
+    public AutoPilotController(bool autoRefill = true)
+    {
+        this.autoRefill = autoRefill;
+    }
 
     public void Reset()
     {
@@ -86,8 +92,8 @@ internal sealed class AutoPilotController
                     attempts[slot] = 0;
                 // No success counter: a hidden slot or optimistic countdown is not a receipt.
                 return Wait("重新规划", state == ChestSlotState.Empty
-                    ? "槽位已隐藏，接下来按实际余额补足双槽储备"
-                    : "槽位已进入倒计时，接下来检查双槽点数储备");
+                    ? (autoRefill ? "槽位已隐藏，接下来按实际余额补足双槽储备" : "槽位已隐藏，继续监控可见宝箱")
+                    : (autoRefill ? "槽位已进入倒计时，接下来检查双槽点数储备" : "槽位已进入倒计时，继续监控双槽变化"));
             }
 
             changedSamples = 0;
@@ -137,6 +143,10 @@ internal sealed class AutoPilotController
 
         stableSlot = -1;
         stableSamples = 0;
+        if (!autoRefill)
+            return Wait("监控中", balance < 1000
+                ? "余额不足，槽位可能隐藏；补点请先停止监控"
+                : "当前没有可领取宝箱，等待槽位变化");
         if (balance >= Reserve)
         {
             lastBalance = balance;
