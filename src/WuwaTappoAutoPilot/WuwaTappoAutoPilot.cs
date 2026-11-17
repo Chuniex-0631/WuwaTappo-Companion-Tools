@@ -14,8 +14,8 @@ using AutomationTreeScope = System.Windows.Automation.TreeScope;
 
 [assembly: AssemblyTitle("桌宠自动挂机助手")]
 [assembly: AssemblyProduct("桌宠自动挂机助手")]
-[assembly: AssemblyVersion("1.0.1.0")]
-[assembly: AssemblyFileVersion("1.0.1.0")]
+[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyFileVersion("1.1.0.0")]
 
 internal static class Program
 {
@@ -26,14 +26,30 @@ internal static class Program
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         bool created;
-        using (Mutex mutex = new Mutex(true, "WuwaTappoAutoPilot.SingleInstance", out created))
+        using (Mutex session = new Mutex(true, CompanionActivation.SessionMutex, out created))
         {
             if (!created)
             {
-                MessageBox.Show("桌宠自动挂机助手已经在运行。", "桌宠自动挂机助手", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                CompanionActivation.RestoreExisting();
                 return;
             }
-            Application.Run(new MonitorForm());
+            using (Mutex mutex = new Mutex(true, "WuwaTappoAutoPilot.SingleInstance", out created))
+            {
+                if (!created)
+                {
+                    MessageBox.Show("旧版自动挂机助手仍在运行，请先退出旧版。", "桌宠自动挂机助手");
+                    return;
+                }
+                using (Mutex otherTool = new Mutex(true, "WuwaTappoToolkit.SingleInstance", out created))
+                {
+                    if (!created)
+                    {
+                        MessageBox.Show("旧版另一款助手仍在运行，请先退出旧版后再启动。", "WuwaTappo Companion Tools");
+                        return;
+                    }
+                    Application.Run(new MonitorForm());
+                }
+            }
         }
     }
 
@@ -46,8 +62,6 @@ internal sealed class MonitorForm : Form
     private const int ScRestore = 0xF120;
     private const int HtCaption = 0x0002;
     private const int WsMinimizeBox = 0x00020000;
-    private const uint AwHide = 0x00010000;
-    private const uint AwBlend = 0x00080000;
     private const int WmDpiChanged = 0x02E0;
     private const int FixedRate = 50;
     private static readonly Color WindowColor = Color.FromArgb(255, 248, 232);
@@ -71,6 +85,7 @@ internal sealed class MonitorForm : Form
     private readonly WindowChromeButton minimizeButton;
     private readonly WindowChromeButton closeButton;
     private readonly System.Windows.Forms.Timer windowAnimationTimer;
+    private readonly TrayController tray;
     private readonly object clickerStateSync = new object();
 
     private volatile bool monitoring;
@@ -95,7 +110,6 @@ internal sealed class MonitorForm : Form
     private long inputLeaseUntil;
     private int remainingInputBudget;
     private volatile bool closing;
-    private bool minimizing;
     private long animationStartedAt;
     private int animationDuration;
     private double animationFrom;
@@ -132,21 +146,21 @@ internal sealed class MonitorForm : Form
 
         minimizeButton = new WindowChromeButton();
         minimizeButton.Text = "−";
-        minimizeButton.AccessibleName = "最小化";
+        minimizeButton.AccessibleName = "最小化到系统托盘";
         minimizeButton.Location = new Point(402, 9);
         minimizeButton.Size = new Size(30, 28);
         minimizeButton.ForeColor = MutedColor;
         minimizeButton.HoverColor = Color.FromArgb(241, 222, 190);
-        minimizeButton.MouseDown += MinimizeButtonMouseDown;
+        minimizeButton.Click += delegate { if (!closing) tray.Minimize(); };
 
         closeButton = new WindowChromeButton();
         closeButton.Text = "×";
-        closeButton.AccessibleName = "关闭";
+        closeButton.AccessibleName = "退出并停止全部操作";
         closeButton.Location = new Point(438, 9);
         closeButton.Size = new Size(30, 28);
         closeButton.ForeColor = MutedColor;
         closeButton.HoverColor = Color.FromArgb(218, 155, 129);
-        closeButton.MouseDown += CloseButtonMouseDown;
+        closeButton.Click += delegate { if (!closing) Close(); };
 
         Label reserveHint = MakeLabel("自动储备双槽点数，低余额隐藏后重新补足", 8.5F, FontStyle.Regular, MutedColor);
         reserveHint.Location = new Point(30, 92);
@@ -160,7 +174,7 @@ internal sealed class MonitorForm : Form
         toggleButton.BackColor = WindowColor;
         toggleButton.Font = new Font("Microsoft YaHei UI", 10.5F, FontStyle.Bold);
         toggleButton.Text = "开启自动挂机";
-        toggleButton.MouseDown += MonitorToggleButtonMouseDown;
+        toggleButton.Click += MonitorToggleButtonClick;
 
         RoundedPanel statusPanel = new RoundedPanel();
         statusPanel.Location = new Point(24, 208);
@@ -239,6 +253,12 @@ internal sealed class MonitorForm : Form
         windowAnimationTimer = new System.Windows.Forms.Timer();
         windowAnimationTimer.Interval = 15;
         windowAnimationTimer.Tick += WindowAnimationTick;
+        tray = new TrayController(this, Text, PrepareTrayWindow,
+            delegate { return monitoring ? "自动挂机已开启" : "已停止"; }, StopAllOperations);
+        ToolTip windowHints = new ToolTip();
+        windowHints.SetToolTip(minimizeButton, "最小化到托盘，当前操作继续运行");
+        windowHints.SetToolTip(closeButton, "退出并停止全部操作");
+        FormClosed += delegate { windowHints.Dispose(); };
         NativeMethods.GetCursorPos(out lastCursorPoint);
         MouseDown += BeginWindowDrag;
         SizeChanged += delegate { UpdateWindowRegion(); };
@@ -262,6 +282,16 @@ internal sealed class MonitorForm : Form
 
     protected override void WndProc(ref Message message)
     {
+        if (message.Msg == CompanionActivation.Message && CompanionActivation.Message != 0)
+        {
+            if (tray != null && !closing) tray.Restore();
+            return;
+        }
+        if (message.Msg == WmSyscommand && (message.WParam.ToInt64() & 0xFFF0L) == 0xF020 && tray != null && !closing)
+        {
+            tray.Minimize();
+            return;
+        }
         if (message.Msg == WmDpiChanged)
         {
             int newDpi = unchecked((int)(message.WParam.ToInt64() & 0xffffL));
@@ -352,28 +382,17 @@ internal sealed class MonitorForm : Form
         return path;
     }
 
-    private void MinimizeButtonMouseDown(object sender, MouseEventArgs e)
+    private void PrepareTrayWindow()
     {
-        if (e.Button != MouseButtons.Left || closing || minimizing) return;
-        minimizing = true;
-        BeginOpacityAnimation(Opacity, 0D, 140, delegate
-        {
-            WindowState = FormWindowState.Minimized;
-            Opacity = 1D;
-            minimizing = false;
-        });
+        windowAnimationTimer.Stop();
+        animationCompleted = null;
+        Opacity = 1D;
     }
 
-    private void CloseButtonMouseDown(object sender, MouseEventArgs e)
+    private void StopAllOperations()
     {
-        if (e.Button != MouseButtons.Left || closing) return;
-        closing = true;
         if (monitoring) ToggleMonitoring();
         StopClicker();
-        windowAnimationTimer.Stop();
-        Opacity = 1D;
-        NativeMethods.AnimateWindow(Handle, 140, AwHide | AwBlend);
-        Close();
     }
 
     private void BeginOpacityAnimation(double from, double to, int duration, Action completed)
@@ -411,9 +430,8 @@ internal sealed class MonitorForm : Form
         return label;
     }
 
-    private void MonitorToggleButtonMouseDown(object sender, MouseEventArgs e)
+    private void MonitorToggleButtonClick(object sender, EventArgs e)
     {
-        if (e.Button != MouseButtons.Left) return;
         long now = Stopwatch.GetTimestamp();
         if ((now - Interlocked.Read(ref lastMonitorButtonToggleTicks)) / (double)Stopwatch.Frequency < 0.25D) return;
         Interlocked.Exchange(ref lastMonitorButtonToggleTicks, now);
@@ -479,7 +497,8 @@ internal sealed class MonitorForm : Form
                 {
                     if (signal.WaitOne(0) || !clickerRunning) break;
                     if (Interlocked.Decrement(ref remainingInputBudget) < 0) break;
-                    if (NativeMethods.SendF24Press()) Interlocked.Increment(ref sentCount);
+                    if (!NativeMethods.SendF24Press()) break;
+                    Interlocked.Increment(ref sentCount);
                 }
                 next = Math.Max(next + interval, clock.Elapsed.TotalSeconds);
             }
@@ -586,7 +605,7 @@ internal sealed class MonitorForm : Form
             if (readJobs.Count >= 2) return null;
             job = new PetReadJob { ProcessId = processId, Generation = generation,
                 Started = sessionClock.Elapsed.TotalSeconds,
-                Task = System.Threading.Tasks.Task.Run((Func<PetReadResult>)ReadPet) };
+                Task = System.Threading.Tasks.Task.Run(delegate { return ReadPet(processId); }) };
             readJobs.Add(job);
         }
         if (await System.Threading.Tasks.Task.WhenAny(job.Task,
@@ -601,9 +620,9 @@ internal sealed class MonitorForm : Form
         return result.ProcessId == processId ? result : null;
     }
 
-    private static PetReadResult ReadPet()
+    private static PetReadResult ReadPet(int processId)
     {
-        using (Process process = FindPetProcess())
+        using (Process process = Process.GetProcessById(processId))
         {
             if (process == null) return new PetReadResult();
             IntPtr window = process.MainWindowHandle;
@@ -690,7 +709,8 @@ internal sealed class MonitorForm : Form
             PetReadResult fresh = await ReadPetWithDeadline(generation);
             if (!IsCurrentScan(generation)) return;
             ChestCandidate latest = fresh != null && fresh.ProcessId == read.ProcessId && fresh.Snapshot != null &&
-                fresh.Snapshot.Available && fresh.Snapshot.PointBalance >= 1000
+                fresh.InputWindow == read.InputWindow && fresh.Snapshot.Available && fresh.Snapshot.PointBalance >= 1000 &&
+                fresh.Snapshot.Upper.State != ChestSlotState.Busy && fresh.Snapshot.Lower.State != ChestSlotState.Busy
                 ? fresh.Snapshot.Slot(candidate.SlotIndex).ToCandidate(candidate.SlotIndex) : null;
             if (latest == null || latest.ScreenCenter != candidate.ScreenCenter)
             {
@@ -703,7 +723,7 @@ internal sealed class MonitorForm : Form
             bool sent = await System.Threading.Tasks.Task.Run(delegate
             {
                 return NativeMethods.ClickAndRestore(fresh.InputWindow, latest.ScreenCenter,
-                    (uint)fresh.ProcessId, delegate { return IsCurrentScan(generation); });
+                    (uint)fresh.ProcessId, delegate { return IsCurrentScan(generation); }, clickerStateSync);
             });
             if (!IsCurrentScan(generation)) return;
             controller.RecordClick(candidate.SlotIndex, fresh.Snapshot.PointBalance,
@@ -837,8 +857,18 @@ internal sealed class MonitorForm : Form
 
 
 
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        base.OnFormClosing(e);
+        if (e.Cancel) return;
+        closing = true;
+        StopAllOperations();
+        PrepareTrayWindow();
+    }
+
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
+        tray.Dispose();
         monitoring = false;
         Interlocked.Increment(ref monitorGeneration);
         scanTimer.Stop();
@@ -1128,59 +1158,61 @@ internal static class NativeMethods
                (GetAsyncKeyState(0x04) & 0x8000) != 0;
     }
 
-    internal static bool ClickAndRestore(IntPtr inputWindow, Point target, uint processId, Func<bool> canContinue)
+    internal static bool ClickAndRestore(IntPtr inputWindow, Point target, uint processId, Func<bool> canContinue, object inputSync)
     {
-        if (!canContinue() || IsMouseButtonDown()) return false;
         Point original;
-        if (!GetCursorPos(out original)) return false;
-        if (!SetCursorPos(target.X, target.Y)) return false;
-        Thread.Sleep(80);
-
-        if (!canContinue() || IsMouseButtonDown() || !IsCursorNear(target, 8) || !BelongsToProcessAt(target, processId, inputWindow))
+        lock (inputSync)
         {
-            RestoreCursorIfUntouched(original, target);
-            return false;
+            if (!canContinue() || IsMouseButtonDown()) return false;
+            if (!GetCursorPos(out original)) return false;
+            if (!SetCursorPos(target.X, target.Y)) return false;
         }
-
-        Point clientPoint = target;
-        if (!ScreenToClient(inputWindow, ref clientPoint))
+        try
         {
-            RestoreCursorIfUntouched(original, target);
-            return false;
-        }
-        int packedCoordinates = unchecked((clientPoint.Y << 16) | (clientPoint.X & 0xffff));
-        if (!PostMessage(inputWindow, 0x0200, IntPtr.Zero, new IntPtr(packedCoordinates)))
-        {
-            RestoreCursorIfUntouched(original, target);
-            return false;
-        }
-        Thread.Sleep(120);
+            Thread.Sleep(80);
+            if (!CanClickAtCursor(target, processId, inputWindow, canContinue)) return false;
 
-        if (!canContinue() || IsMouseButtonDown() || !IsCursorNear(target, 8) || !BelongsToProcessAt(target, processId, inputWindow))
-        {
-            RestoreCursorIfUntouched(original, target);
-            return false;
-        }
+            Point clientPoint = target;
+            if (!ScreenToClient(inputWindow, ref clientPoint)) return false;
+            int packedCoordinates = unchecked((clientPoint.Y << 16) | (clientPoint.X & 0xffff));
+            if (!PostMessage(inputWindow, 0x0200, IntPtr.Zero, new IntPtr(packedCoordinates))) return false;
+            Thread.Sleep(120);
+            if (!CanClickAtCursor(target, processId, inputWindow, canContinue)) return false;
 
-        INPUT[] inputs = new INPUT[2];
-        inputs[0].type = 0;
-        inputs[0].U.mi.dwFlags = 0x0002;
-        inputs[1].type = 0;
-        inputs[1].U.mi.dwFlags = 0x0004;
-        uint sentDown = SendInput(1, new INPUT[] { inputs[0] }, Marshal.SizeOf(typeof(INPUT)));
-        Thread.Sleep(65);
-        uint sentUp = SendInput(1, new INPUT[] { inputs[1] }, Marshal.SizeOf(typeof(INPUT)));
-        Thread.Sleep(180);
-        RestoreCursorIfUntouched(original, target);
-        return sentDown == 1 && sentUp == 1;
+            INPUT[] inputs = new INPUT[2];
+            inputs[0].type = 0;
+            inputs[0].U.mi.dwFlags = 0x0002;
+            inputs[1].type = 0;
+            inputs[1].U.mi.dwFlags = 0x0004;
+            // Submit a balanced click in one batch: shutdown or user movement cannot split
+            // a deliberate sleep between down/up. Repair the documented partial-send case.
+            bool sent;
+            lock (inputSync)
+            {
+                if (!CanClickAtCursor(target, processId, inputWindow, canContinue)) return false;
+                sent = SendBalancedPress(inputs, delegate(INPUT[] batch)
+                    { return InputSender((uint)batch.Length, batch, Marshal.SizeOf(typeof(INPUT))); });
+            }
+            Thread.Sleep(180);
+            return sent;
+        }
+        finally { RestoreCursorIfUntouched(original, target); }
+    }
+
+    private static bool CanClickAtCursor(Point target, uint processId, IntPtr inputWindow, Func<bool> canContinue)
+    {
+        Point cursor;
+        return canContinue() && !IsMouseButtonDown() && IsCursorNear(target, 8) &&
+            GetCursorPos(out cursor) && BelongsToProcessAt(target, processId, inputWindow) &&
+            BelongsToProcessAt(cursor, processId, inputWindow);
     }
 
     private static void RestoreCursorIfUntouched(Point original, Point automaticTarget)
     {
         Point current;
         if (!GetCursorPos(out current)) return;
-        int dx = current.X - automaticTarget.X;
-        int dy = current.Y - automaticTarget.Y;
+        double dx = (double)current.X - automaticTarget.X;
+        double dy = (double)current.Y - automaticTarget.Y;
         if (dx * dx + dy * dy <= 64)
             SetCursorPos(original.X, original.Y);
     }
@@ -1189,8 +1221,8 @@ internal static class NativeMethods
     {
         Point current;
         if (!GetCursorPos(out current)) return false;
-        int dx = current.X - target.X;
-        int dy = current.Y - target.Y;
+        double dx = (double)current.X - target.X;
+        double dy = (double)current.Y - target.Y;
         return dx * dx + dy * dy <= radius * radius;
     }
 
@@ -1203,7 +1235,17 @@ internal static class NativeMethods
         up.type = 1;
         up.U.ki.wVk = 0x87;
         up.U.ki.dwFlags = 0x0002;
-        return SendInput(2, new INPUT[] { down, up }, Marshal.SizeOf(typeof(INPUT))) == 2;
+        return SendBalancedPress(new INPUT[] { down, up }, delegate(INPUT[] batch)
+            { return InputSender((uint)batch.Length, batch, Marshal.SizeOf(typeof(INPUT))); });
+    }
+
+    internal static Func<uint, INPUT[], int, uint> InputSender = SendInput;
+
+    internal static bool SendBalancedPress(INPUT[] inputs, Func<INPUT[], uint> sender)
+    {
+        uint sent = sender(inputs);
+        if (sent == 1) sender(new INPUT[] { inputs[1] });
+        return sent == 2;
     }
 
     internal static void SendF24KeyUp()
@@ -1212,7 +1254,7 @@ internal static class NativeMethods
         up.type = 1;
         up.U.ki.wVk = 0x87;
         up.U.ki.dwFlags = 0x0002;
-        SendInput(1, new INPUT[] { up }, Marshal.SizeOf(typeof(INPUT)));
+        InputSender(1, new INPUT[] { up }, Marshal.SizeOf(typeof(INPUT)));
     }
 
     internal static void TimeBeginPeriod(uint period) { NativeTimeBeginPeriod(period); }

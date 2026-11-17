@@ -25,6 +25,9 @@ internal static class AutoPilotControllerTests
         Run("Manual hidden-after-debit returns to monitoring", ManualHiddenCycle);
         Run("Manual dual-chest cycle requires no refill", ManualDualCycle);
         Run("Manual disabled, unavailable and backoff stay safe", ManualBusyAndBackoff);
+        Run("Unstable hidden/countdown response still has a deadline", UnstableResponseDeadline);
+        Run("Accessibility disabled button takes precedence in any tree order", DisabledButtonPrecedence);
+        Run("Accessibility point, timer and geometry projection fails closed", AccessibilityProjection);
         Console.WriteLine("PASS: " + scenarios + " scenarios; " + assertions + " assertions.");
     }
 
@@ -339,4 +342,121 @@ internal static class AutoPilotControllerTests
         Expect(PilotAction.Wait, c.Observe(ready, 19), "manual retry stabilizes");
         ExpectSlot(0, c.Observe(ready, 20), "manual retry after backoff");
     }
+    private static void UnstableResponseDeadline()
+    {
+        foreach (bool autoFill in new bool[] { true, false })
+        {
+            AutoPilotController c = new AutoPilotController(autoFill);
+            c.RecordClick(0, 1500, 0, true);
+            for (int t = 2; t <= 12; t++)
+            {
+                ChestSlotState upper = t % 2 == 0 ? ChestSlotState.Empty : ChestSlotState.Countdown;
+                PilotDecision d = c.Observe(Snapshot(500, upper, ChestSlotState.Empty), t);
+                Expect(PilotAction.Wait, d, "alternating response pauses input " + t);
+                if (t == 12)
+                {
+                    assertions++;
+                    if (d.State != "等待重试") throw new Exception("unstable response bypassed the 12 second deadline");
+                }
+            }
+            Expect(autoFill ? PilotAction.Fill : PilotAction.Wait,
+                c.Observe(Snapshot(500, ChestSlotState.Empty, ChestSlotState.Empty), 13),
+                "after deadline normal planning resumes");
+        }
+    }
+
+    private static ChestAccessibilityNode Node(System.Windows.Automation.ControlType kind,
+        string name, double left, double top, double width, double height, bool enabled = true)
+    {
+        return new ChestAccessibilityNode { ControlType = kind, Name = name,
+            Bounds = new System.Windows.Rect(left, top, width, height), Enabled = enabled };
+    }
+
+    private static ChestAccessibilityNode Counter(long balance)
+    {
+        return Node(System.Windows.Automation.ControlType.Text, balance.ToString(
+            System.Globalization.CultureInfo.InvariantCulture), 100, 200, 50, 23.2);
+    }
+
+    private static void Check(bool condition, string message)
+    {
+        assertions++;
+        if (!condition) throw new Exception(message);
+    }
+
+    private static void DisabledButtonPrecedence()
+    {
+        ChestAccessibilityNode button = Node(System.Windows.Automation.ControlType.Button,
+            "", 120, 101.2, 62, 44, false);
+        ChestAccessibilityNode timer = Node(System.Windows.Automation.ControlType.Image,
+            "00:10", 120, 101.2, 62, 44);
+        foreach (bool timerFirst in new bool[] { true, false })
+        {
+            ChestAccessibilitySnapshot s = ChestAccessibilityReader.Interpret(new ChestAccessibilityNode[] {
+                Counter(1000), timerFirst ? timer : button, timerFirst ? button : timer });
+            Check(s.Available && s.Upper.State == ChestSlotState.Busy,
+                "countdown must not hide a disabled button");
+            Expect(PilotAction.Wait, new AutoPilotController().Observe(s, 0), "disabled countdown pauses automatic fill");
+            Expect(PilotAction.Wait, new AutoPilotController(false).Observe(s, 0), "disabled countdown pauses manual monitoring");
+        }
+    }
+
+    private static void AccessibilityProjection()
+    {
+        ChestAccessibilitySnapshot empty = ChestAccessibilityReader.Interpret(new ChestAccessibilityNode[] { Counter(0) });
+        Check(empty.Available && empty.PointBalance == 0 && empty.Upper.State == ChestSlotState.Empty,
+            "zero balance with hidden slots remains observable");
+        Check(!ChestAccessibilityReader.Interpret(new ChestAccessibilityNode[] { }).Available,
+            "missing counter is unavailable");
+        Check(!ChestAccessibilityReader.Interpret(new ChestAccessibilityNode[] { Counter(1000), Counter(2000) }).Available,
+            "multiple numeric text nodes are ambiguous");
+        Check(!ChestAccessibilityReader.Interpret(new ChestAccessibilityNode[] {
+            Node(System.Windows.Automation.ControlType.Text, "1,000", 100, 200, 50, 23.2) }).Available,
+            "a formatted unrelated number is not accepted as the raw point counter");
+        ChestAccessibilitySnapshot slots = ChestAccessibilityReader.Interpret(new ChestAccessibilityNode[] {
+            Counter(2000), Node(System.Windows.Automation.ControlType.Button, "", 120, 101.2, 62, 44),
+            Node(System.Windows.Automation.ControlType.Image, "00:59", 120, 149.2, 62, 44) });
+        Check(slots.Available && slots.Upper.State == ChestSlotState.Ready && slots.Lower.State == ChestSlotState.Countdown,
+            "expected upper button and lower countdown project to their slots");
+        Check(!ChestAccessibilityReader.Interpret(new ChestAccessibilityNode[] {
+            Counter(1000), Node(System.Windows.Automation.ControlType.Button, "", 120, 101.2, 62, 44),
+            Node(System.Windows.Automation.ControlType.Button, "", 200, 101.2, 62, 44) }).Available,
+            "two distinct matching buttons in one slot are ambiguous");
+        Check(ChestAccessibilityReader.Interpret(new ChestAccessibilityNode[] {
+            Counter(1000), Node(System.Windows.Automation.ControlType.Button, "", 120, 101.2, 62, 44),
+            Node(System.Windows.Automation.ControlType.Button, "", 120, 101.2, 62, 44) }).Available,
+            "duplicate nodes with identical bounds are coalesced");
+        foreach (double scale in new double[] { 0.75, 1, 1.25, 1.5, 2, 3 })
+        {
+            double counterY = 200 + 23.2 * scale / 2;
+            ChestAccessibilitySnapshot scaled = ChestAccessibilityReader.Interpret(new ChestAccessibilityNode[] {
+                Node(System.Windows.Automation.ControlType.Text, "2000", -1400, 200, 50 * scale, 23.2 * scale),
+                Node(System.Windows.Automation.ControlType.Button, "", -1400 + 20 * scale,
+                    counterY - 88.4 * scale - 22 * scale, 62 * scale, 44 * scale),
+                Node(System.Windows.Automation.ControlType.Image, "00:59", -1400 + 20 * scale,
+                    counterY - 40.4 * scale - 22 * scale, 62 * scale, 44 * scale) });
+            Check(scaled.Available && scaled.Upper.State == ChestSlotState.Ready && scaled.Lower.State == ChestSlotState.Countdown,
+                "scaled negative-monitor geometry: " + scale);
+        }
+        string[] invalidTimers = { "00:60", "-1:00", "1:2", "1:000", "1:2:00", "timer" };
+        foreach (string timer in invalidTimers)
+        {
+            ChestAccessibilitySnapshot s = ChestAccessibilityReader.Interpret(new ChestAccessibilityNode[] {
+                Counter(2000), Node(System.Windows.Automation.ControlType.Image, timer, 120, 101.2, 62, 44) });
+            Check(s.Upper.State == ChestSlotState.Empty, "invalid countdown ignored: " + timer);
+        }
+        ChestAccessibilitySnapshot unrelated = ChestAccessibilityReader.Interpret(new ChestAccessibilityNode[] {
+            Counter(1000), Node(System.Windows.Automation.ControlType.Button, "", 800, 101.2, 62, 44),
+            Node(System.Windows.Automation.ControlType.Button, "", 120, 101.2, 500, 44),
+            Node(System.Windows.Automation.ControlType.Button, "", 120, 500, 62, 44) });
+        Check(unrelated.Upper.State == ChestSlotState.Empty && unrelated.Lower.State == ChestSlotState.Empty,
+            "buttons outside the slot layout cannot become targets");
+        Check(!ChestAccessibilityReader.Interpret(new ChestAccessibilityNode[] {
+            Node(System.Windows.Automation.ControlType.Text, "1000", double.NaN, 200, 50, 23.2) }).Available,
+            "non-finite counter bounds are not input evidence");
+        Check(!ChestAccessibilityReader.Interpret(new ChestAccessibilityNode[] {
+            Node(System.Windows.Automation.ControlType.Text, "1000", 100, 200, double.PositiveInfinity, 23.2) }).Available,
+            "infinite counter bounds are not input evidence");
+    }
+
 }

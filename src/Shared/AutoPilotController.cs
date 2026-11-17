@@ -80,23 +80,24 @@ internal sealed class AutoPilotController
                     changedState = state;
                 }
                 changedSamples++;
-                if (changedSamples < 2 || now - changedSince < 0.5)
+                if (changedSamples >= 2 && now - changedSince >= 0.5)
+                {
+                    int slot = pendingSlot;
+                    pendingSlot = -1;
+                    stableSlot = -1;
+                    stableSamples = changedSamples = 0;
+                    lastBalance = -1;
+                    if (beforeClick - balance >= 1000)
+                        attempts[slot] = 0;
+                    // No success counter: a hidden slot or optimistic countdown is not a receipt.
+                    return Wait("重新规划", state == ChestSlotState.Empty
+                        ? (autoRefill ? "槽位已隐藏，接下来按实际余额补足双槽储备" : "槽位已隐藏，继续监控可见宝箱")
+                        : (autoRefill ? "槽位已进入倒计时，接下来检查双槽点数储备" : "槽位已进入倒计时，继续监控双槽变化"));
+                }
+                if (now - clickedAt < 12.0)
                     return Wait("同步槽位状态", "目标槽位已变化，正在复核当前界面");
-
-                int slot = pendingSlot;
-                pendingSlot = -1;
-                stableSlot = -1;
-                stableSamples = changedSamples = 0;
-                lastBalance = -1;
-                if (beforeClick - balance >= 1000)
-                    attempts[slot] = 0;
-                // No success counter: a hidden slot or optimistic countdown is not a receipt.
-                return Wait("重新规划", state == ChestSlotState.Empty
-                    ? (autoRefill ? "槽位已隐藏，接下来按实际余额补足双槽储备" : "槽位已隐藏，继续监控可见宝箱")
-                    : (autoRefill ? "槽位已进入倒计时，接下来检查双槽点数储备" : "槽位已进入倒计时，继续监控双槽变化"));
             }
-
-            changedSamples = 0;
+            else changedSamples = 0;
             if (now - clickedAt < 12.0)
                 return Wait("等待领取响应", "桌宠仍在处理，期间不会重复点击");
 
@@ -104,7 +105,7 @@ internal sealed class AutoPilotController
             pendingSlot = -1;
             retryAt[failed] = now + RetryDelay(attempts[failed]);
             stableSlot = -1;
-            stableSamples = 0;
+            stableSamples = changedSamples = 0;
             return Wait("等待重试", "响应尚未确认，将延迟重试并重新读取状态");
         }
 

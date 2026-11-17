@@ -13,6 +13,7 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,16 +27,13 @@ jobs:
       - name: Build
         run: msbuild WuwaTappoCompanionTools.sln /m /p:Configuration=Release /p:ContinuousIntegrationBuild=true
 
-      - name: Build offline state-machine tests
-        run: msbuild tests/AutoPilotControllerTests.csproj /restore /p:Configuration=Release
-
-      - name: Run offline state-machine tests
-        run: ./tests/bin/Release/net48/AutoPilotControllerTests.exe
+      - name: Build release files and test both applications
+        run: ./scripts/build.ps1 -Test
 
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
           name: WuwaTappo-Companion-Tools
           path: |
-            src/WuwaTappoToolkit/bin/Release/net48/WuwaTappoToolkit.exe
-            src/WuwaTappoAutoPilot/bin/Release/net48/WuwaTappoAutoPilot.exe
+            dist/WuwaTappoToolkit.exe
+            dist/WuwaTappoAutoPilot.exe
