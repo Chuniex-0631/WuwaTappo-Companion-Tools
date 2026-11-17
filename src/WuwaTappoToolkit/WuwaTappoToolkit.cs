@@ -14,8 +14,8 @@ using AutomationTreeScope = System.Windows.Automation.TreeScope;
 
 [assembly: AssemblyTitle("桌宠工具箱")]
 [assembly: AssemblyProduct("桌宠工具箱")]
-[assembly: AssemblyVersion("1.5.0.0")]
-[assembly: AssemblyFileVersion("1.5.0.0")]
+[assembly: AssemblyVersion("1.5.1.0")]
+[assembly: AssemblyFileVersion("1.5.1.0")]
 
 internal static class Program
 {
@@ -1012,7 +1012,7 @@ internal sealed class MonitorForm : Form
     }
 }
 
-internal sealed class WindowChromeButton : Button
+internal sealed class WindowChromeButton : F24SafeButton
 {
     private bool hovered;
     private bool pressed;
@@ -1091,7 +1091,7 @@ internal sealed class RoundedPanel : Panel
     }
 }
 
-internal sealed class ModernButton : Button
+internal sealed class ModernButton : F24SafeButton
 {
     private bool hovered;
     private bool pressed;

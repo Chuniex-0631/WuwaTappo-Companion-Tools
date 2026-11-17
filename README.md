@@ -27,20 +27,20 @@ WuwaTappo Companion Tools 是面向 **鸣潮桌宠 / Wuwa Tappo** 的开源 Wind
 
 ## 最新版本与下载
 
-**合集 v1.2.0：Toolkit 1.5.0 + AutoPilot 1.1.0**
+**合集 v1.2.1：Toolkit 1.5.1 + AutoPilot 1.1.1**
 
-本次更新为两款工具加入统一的系统托盘控制，并审查、修复输入发送、点击前复核和状态读取中的边界问题。最小化后继续运行，可从托盘停止操作、恢复窗口或退出；重复启动任一款会恢复已经运行的工具，避免同时操作桌宠。
+本次修复补点或计数期间点击“−”可能无效的问题：持续发送的 F24 曾干扰按钮的正常点击判定。两款工具共用按钮保护，最小化、停止及关闭操作均受到保护，同时保留标准 Click、键盘和辅助功能触发。最小化后补点或计数继续运行，可从托盘恢复、停止全部操作或退出。
 
-两款程序分别构建并运行共享状态机、界面识别与桌面生命周期回归。测试使用离线快照和可替换的输入接口，不使用真实账号领取。验证结果及覆盖边界见 [v1.2.0 验证记录](docs/VALIDATION-v1.2.0.md)。
+新增真实按钮事件交错回归，覆盖“鼠标按下 → F24 释放 → 鼠标释放”；v1.2.0 的生命周期测试没有覆盖这一路径，因此此前漏检。测试使用离线快照、程序内事件和可替换的输入接口，不使用真实账号领取。验证结果及覆盖边界见 [v1.2.1 验证记录](docs/VALIDATION-v1.2.1.md)。
 
-[工具箱 EXE](https://github.com/Chuniex-0631/WuwaTappo-Companion-Tools/releases/download/v1.2.0/WuwaTappoToolkit.exe) · [自动挂机 EXE](https://github.com/Chuniex-0631/WuwaTappo-Companion-Tools/releases/download/v1.2.0/WuwaTappoAutoPilot.exe) · [合集 ZIP](https://github.com/Chuniex-0631/WuwaTappo-Companion-Tools/releases/download/v1.2.0/WuwaTappo-Companion-Tools-v1.2.0.zip) · [SHA-256](https://github.com/Chuniex-0631/WuwaTappo-Companion-Tools/releases/download/v1.2.0/CHECKSUMS.txt)
+[工具箱 EXE](https://github.com/Chuniex-0631/WuwaTappo-Companion-Tools/releases/download/v1.2.1/WuwaTappoToolkit.exe) · [自动挂机 EXE](https://github.com/Chuniex-0631/WuwaTappo-Companion-Tools/releases/download/v1.2.1/WuwaTappoAutoPilot.exe) · [合集 ZIP](https://github.com/Chuniex-0631/WuwaTappo-Companion-Tools/releases/download/v1.2.1/WuwaTappo-Companion-Tools-v1.2.1.zip) · [SHA-256](https://github.com/Chuniex-0631/WuwaTappo-Companion-Tools/releases/download/v1.2.1/CHECKSUMS.txt)
 
 ## 两款工具
 
 | 程序 | 适合场景 | 主要功能 |
 | --- | --- | --- |
-| **WuwaTappoToolkit 1.5.0** | 希望分别控制计数与宝箱监控 | 约 50 次/秒 F24、Pause 快捷键、上下槽位监控、自动领取；监控期间不自动补点 |
-| **WuwaTappoAutoPilot 1.1.0** | 希望一键自动运行 | 自动补点、双槽 2000 点储备、宝箱优先领取、低余额隐藏后自动恢复补点 |
+| **WuwaTappoToolkit 1.5.1** | 希望分别控制计数与宝箱监控 | 约 50 次/秒 F24、Pause 快捷键、上下槽位监控、自动领取；监控期间不自动补点 |
+| **WuwaTappoAutoPilot 1.1.1** | 希望一键自动运行 | 自动补点、双槽 2000 点储备、宝箱优先领取、低余额隐藏后自动恢复补点 |
 
 两款工具具有相同的槽位观察、点击前复核、领取等待和逐槽退避机制。差异在于谁决定补点：工具箱由你手动控制，自动挂机助手由内部计划控制。
 
@@ -63,7 +63,8 @@ WuwaTappo Companion Tools 是面向 **鸣潮桌宠 / Wuwa Tappo** 的开源 Wind
 - **逐槽退避**：持续无响应的槽位会延迟重试，另一槽可领取时仍有处理机会；禁用中的按钮只等待。
 - **安全输入**：领取前停止 F24；检测到用户移动或按下鼠标时自动延迟点击。
 - **双槽点数规划**：自动挂机版为两个宝箱保留 2000 点余额，领取后按实际余额重新规划。
-- **系统托盘控制**：最小化后继续工作；双击恢复，右键查看状态、停止全部操作或退出。
+- **系统托盘控制**：补点或计数期间也可最小化，后台继续工作；双击恢复，右键查看状态、停止全部操作或退出。
+- **按钮输入保护**：两款工具的最小化、关闭和功能按钮过滤 F24 键盘事件，保留标准点击、键盘和辅助功能操作。
 - **单一运行实例**：同一 Windows 会话只运行一款工具；再次启动新版会恢复已有窗口，并检查旧版程序占用。
 - **统一退出处理**：X、Alt+F4 和托盘“退出”均停止输入与监控，清理计时器及托盘图标。
 - **Windows DPI 适配**：使用 Per-Monitor V2 处理窗口缩放。
@@ -145,11 +146,11 @@ msbuild WuwaTappoCompanionTools.sln /p:Configuration=Release
 
 ```text
 ├─ src/
-│  ├─ Shared/                # 共用槽位读取、领取状态机和托盘控制
+│  ├─ Shared/                # 共用槽位读取、领取状态机、托盘与按钮保护
 │  ├─ WuwaTappoToolkit/      # 手动工具箱源码
 │  └─ WuwaTappoAutoPilot/    # 全自动挂机源码
 ├─ dist/                     # 发布版 Windows 可执行文件
-├─ tests/                    # 状态机、桌面生命周期和输入回归
+├─ tests/                    # 状态机、桌面生命周期、按钮交互和输入回归
 ├─ assets/                   # 项目截图与视觉资源
 ├─ docs/                     # 构建及技术说明
 └─ .github/                  # CI 与 Issue 模板
@@ -161,7 +162,7 @@ msbuild WuwaTappoCompanionTools.sln /p:Configuration=Release
 
 ## English summary
 
-**WuwaTappo Companion Tools** is an open-source Windows utility suite for the Wuthering Waves desktop companion **Wuwa Tappo**. Toolkit provides manual F24 clicking and chest monitoring; AutoPilot coordinates both automatically. They share local UI Automation reading, hidden-slot handling, guarded mouse input, and per-slot retry backoff. Both tools minimize to the system tray, where users can restore the window, stop all operations, or exit. A shared session lock prevents concurrent assistants; launching either tool again restores the running one. The tools make no network requests; the original app still handles account login and reward claims through its own network flow. No OCR, packet interception, memory injection, or modification of the original app is involved.
+**WuwaTappo Companion Tools** is an open-source Windows utility suite for the Wuthering Waves desktop companion **Wuwa Tappo**. Toolkit provides manual F24 clicking and chest monitoring; AutoPilot coordinates both automatically. They share local UI Automation reading, hidden-slot handling, guarded mouse input, and per-slot retry backoff. Both tools minimize to the system tray, where users can restore the window, stop all operations, or exit. Version 1.2.1 fixes F24 key-up events cancelling mouse clicks during filling or manual counting, while preserving standard Click, keyboard and accessibility activation. A shared session lock prevents concurrent assistants; launching either tool again restores the running one. The tools make no network requests; the original app still handles account login and reward claims through its own network flow. No OCR, packet interception, memory injection, or modification of the original app is involved.
 
 Keywords: `Wuwa Tappo`, `Wuthering Waves desktop pet`, `鸣潮桌宠`, `auto clicker`, `chest auto claim`, `Windows UI Automation`.
 

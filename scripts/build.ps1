@@ -23,7 +23,7 @@ foreach ($appName in @('WuwaTappoToolkit', 'WuwaTappoAutoPilot')) {
     if ($Test) {
         $testOutput = Join-Path $repoRoot "tests\bin\$appName"
         New-Item -ItemType Directory -Force $testOutput | Out-Null
-        $testNames = @('AutoPilotControllerTests', 'DesktopLifecycleTests', 'InputDeliveryTests')
+        $testNames = @('AutoPilotControllerTests', 'DesktopLifecycleTests', 'InputDeliveryTests', 'ButtonInteractionTests')
         if ($appName -eq 'WuwaTappoAutoPilot') { $testNames += 'AutoPilotWorkerTests' }
         foreach ($testName in $testNames) {
             & $compiler /nologo /target:exe /optimize+ /warnaserror+ "/main:$testName" `

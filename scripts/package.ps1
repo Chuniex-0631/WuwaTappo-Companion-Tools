@@ -2,7 +2,7 @@ param([switch]$NoBuild)
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 if (!$NoBuild) { & (Join-Path $PSScriptRoot 'build.ps1') -Test }
-$version = 'v1.2.0'
+$version = 'v1.2.1'
 $releaseOutput = Join-Path $repoRoot "artifacts\$version"
 $stage = Join-Path $releaseOutput ('stage-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force $stage | Out-Null
